@@ -1,0 +1,75 @@
+name: Build Node24 Android ARM64
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-node:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            python3 g++ make git curl build-essential \
+            clang llvm pkg-config \
+            zlib1g-dev libssl-dev libbrotli-dev libc-ares-dev
+
+      - name: Clone Node 24
+        run: |
+          git clone https://github.com/nodejs/node --branch v24.x --depth 1 node24
+
+      - name: Configure Node for Android ARM64
+        working-directory: node24
+        run: |
+          ./configure \
+            --prefix=/output \
+            --dest-os=android \
+            --dest-cpu=arm64 \
+            --without-snapshot \
+            --with-intl=none \
+            --shared-cares \
+            --shared-zlib \
+            --shared-brotli \
+            --shared-openssl \
+            --openssl-use-def-ca-store \
+            --no-create-symlinks \
+            CC=clang CXX=clang++
+
+      - name: Build Node
+        working-directory: node24
+        run: |
+          make -j$(nproc)
+          make install DESTDIR=/tmp/nodeandroid
+
+      - name: Prepare final Android bundle
+        run: |
+          mkdir -p final/usr/bin
+          mkdir -p final/usr/lib
+
+          cp /tmp/nodeandroid/output/bin/node final/usr/bin/
+          cp /tmp/nodeandroid/output/lib/*.so final/usr/lib/
+
+          cd final
+          zip -r node24-android-arm64.zip usr
+
+      - name: Upload Artifact (for Actions)
+        uses: actions/upload-artifact@v4
+        with:
+          name: node24-android-arm64
+          path: final/node24-android-arm64.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: node24-arm64
+          name: Node 24 Android ARM64 Build
+          draft: false
+          prerelease: false
+          files: final/node24-android-arm64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
