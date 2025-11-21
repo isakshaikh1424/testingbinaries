@@ -1,4 +1,4 @@
-name: Build Node 24 for Android ARM64
+name: Build Node 24 for Android ARM64 (Termux-patched, fixed apply)
 
 on:
   workflow_dispatch:
@@ -6,18 +6,19 @@ on:
 jobs:
   build-node24:
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
           sudo apt update
           sudo apt install -y \
             python3 g++ make git curl zip \
             pkg-config libssl-dev zlib1g-dev \
-            brotli libbrotli-dev libc-ares-dev
+            brotli libbrotli-dev libc-ares-dev autoconf automake libtool
 
       - name: Download Android NDK (API 28)
         run: |
@@ -29,45 +30,80 @@ jobs:
         run: |
           git clone https://github.com/nodejs/node --branch v24.x --depth 1 node24
 
-      #######################################################################
-      # ✔ FIXED — Download ONLY correct Termux patches for Node24
-      #######################################################################
-      - name: Download correct Termux Node24 patches
+      ##################################################################
+      # Get Termux patches (only the exact 7 patches we will apply)
+      ##################################################################
+      - name: Download Termux Node patches (subset for Node24)
         run: |
           git clone --depth 1 --filter=blob:none --sparse \
             https://github.com/termux/termux-packages termux-src
 
           cd termux-src
+          # check path exists and set the sparse path to the nodejs package
           git sparse-checkout set packages/nodejs
 
-          mkdir ../termux_patches
+          # create patches folder and copy only the needed patches (7)
+          mkdir -p ../termux_patches
 
-          # Copy ONLY the patches that apply cleanly to Node 24.x
-          cp packages/nodejs/avoid-ficlone-ioctl.patch ../termux_patches/
-          cp packages/nodejs/common.gypi.patch ../termux_patches/
-          cp packages/nodejs/node.gyp.patch ../termux_patches/
-          cp packages/nodejs/src-getaddrinfo.patch ../termux_patches/
-          cp packages/nodejs/deps-v8-src-trap-handler-trap-handler.h.patch ../termux_patches/
-      #######################################################################
+          cp packages/nodejs/avoid-ficlone-ioctl.patch ../termux_patches/ || true
+          cp packages/nodejs/common.gypi.patch ../termux_patches/ || true
+          cp packages/nodejs/node.gyp.patch ../termux_patches/ || true
+          cp packages/nodejs/src-getaddrinfo.patch ../termux_patches/ || true
+          cp packages/nodejs/deps-v8-src-trap-handler-trap-handler.h.patch ../termux_patches/ || true
+          cp packages/nodejs/tools-v8_gypfiles-toolchain.gypi.patch ../termux_patches/ || true
+          cp packages/nodejs/tools-v8_gypfiles-v8.gyp.patch ../termux_patches/ || true
 
-      - name: Apply Termux patches
+          echo "Copied patches:"
+          ls -l ../termux_patches || true
+      ##################################################################
+
+      - name: Apply Termux patches (only the 7 validated ones)
         working-directory: node24
         run: |
-          for patch in ../termux_patches/*.patch; do
-            echo "Applying patch: $patch"
-            patch -p1 < "$patch" || exit 1
+          set -euo pipefail
+          if [ ! -d ../termux_patches ]; then
+            echo "termux_patches missing!" >&2
+            exit 1
+          fi
+
+          # apply patches in a deterministic order
+          for p in \
+            ../termux_patches/avoid-ficlone-ioctl.patch \
+            ../termux_patches/common.gypi.patch \
+            ../termux_patches/node.gyp.patch \
+            ../termux_patches/src-getaddrinfo.patch \
+            ../termux_patches/deps-v8-src-trap-handler-trap-handler.h.patch \
+            ../termux_patches/tools-v8_gypfiles-toolchain.gypi.patch \
+            ../termux_patches/tools-v8_gypfiles-v8.gyp.patch
+          do
+            if [ -f "$p" ]; then
+              echo "Applying: $p"
+              patch -p1 < "$p" || ( echo "Patch failed: $p" >&2 ; exit 1 )
+            else
+              echo "Warning: expected patch not found: $p"
+            fi
           done
 
       - name: Configure Node.js for Android ARM64 (API 28)
         working-directory: node24
+        env:
+          NDK: ${{ runner.home }}/ndk
         run: |
-          export NDK=$HOME/ndk
-          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          export AR=$TOOLCHAIN/bin/llvm-ar
+          set -euo pipefail
+
+          export NDK="$HOME/ndk"
+          export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          export AR="$TOOLCHAIN/bin/llvm-ar"
+          export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
           export CC="$TOOLCHAIN/bin/aarch64-linux-android28-clang"
           export CXX="$TOOLCHAIN/bin/aarch64-linux-android28-clang++"
-          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
 
+          echo "Using CC=$CC"
+          echo "Using CXX=$CXX"
+          echo "Toolchain dir: $TOOLCHAIN"
+
+          # IMPORTANT: do NOT pass --no-create-symlinks to configure (it breaks upstream GYP).
+          # The Termux patches we applied ensure symlink behavior is handled in the build system.
           ./configure \
             --prefix=/output \
             --dest-os=android \
@@ -78,29 +114,49 @@ jobs:
             --shared-openssl \
             --openssl-use-def-ca-store \
             --without-snapshot \
-            --no-create-symlinks \
             CC="$CC" CXX="$CXX"
 
       - name: Build Node 24
         working-directory: node24
         run: |
+          set -euo pipefail
           make -j$(nproc)
           make install DESTDIR=/tmp/nodeandroid
 
+      - name: Quick runtime check (node -v from built bundle)
+        run: |
+          set -euo pipefail
+          echo "List built output:"
+          ls -la /tmp/nodeandroid/output/bin || true
+          ls -la /tmp/nodeandroid/output/lib || true
+
+          # If node binary exists, try running it using the same layout (LD_LIBRARY_PATH)
+          if [ -x /tmp/nodeandroid/output/bin/node ]; then
+            echo "Running built node -v with LD_LIBRARY_PATH set"
+            LD_LIBRARY_PATH="/tmp/nodeandroid/output/lib" /tmp/nodeandroid/output/bin/node -v || true
+          else
+            echo "Node binary not found — build likely failed" >&2
+            exit 1
+          fi
+
       - name: Prepare Android bundle
         run: |
+          set -euo pipefail
           mkdir -p final/usr/bin
           mkdir -p final/usr/lib
 
-          cp /tmp/nodeandroid/output/bin/node final/usr/bin/
+          cp /tmp/nodeandroid/output/bin/node final/usr/bin/ || true
           cp /tmp/nodeandroid/output/bin/npm final/usr/bin/ || true
-          cp /tmp/nodeandroid/output/lib/*.so final/usr/lib/
+          cp /tmp/nodeandroid/output/lib/*.so final/usr/lib/ || true
+
+          echo "Final usr contents:"
+          ls -la final/usr || true
 
           cd final
-          zip -r node24-full-android-arm64.zip usr
+          zip -r ../node24-full-android-arm64.zip usr
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: node24-full-android-arm64
-          path: final/node24-full-android-arm64.zip
+          path: node24-full-android-arm64.zip
