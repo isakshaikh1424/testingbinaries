@@ -1,0 +1,103 @@
+name: Build Node20 Android ARM64 (Minimal + Full)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-node:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            python3 g++ make git curl build-essential \
+            clang llvm pkg-config zip \
+            zlib1g-dev libssl-dev libbrotli-dev libc-ares-dev
+
+      - name: Install Android NDK
+        run: |
+          wget https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+          unzip android-ndk-r26d-linux.zip
+          mv android-ndk-r26d $HOME/android-ndk
+
+      - name: Clone Node 20 source
+        run: |
+          git clone https://github.com/nodejs/node --branch v20.x --depth 1 node20
+
+      - name: Configure Node20 for Android ARM64
+        working-directory: node20
+        env:
+          ANDROID_NDK: ${{ runner.temp }}/../home/runner/android-ndk
+        run: |
+          export PATH="$HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+
+          ./configure \
+            --prefix=/output \
+            --dest-os=android \
+            --dest-cpu=arm64 \
+            --without-npm \
+            --without-inspector \
+            --without-snapshot \
+            --with-intl=none \
+            --shared-zlib \
+            --shared-brotli \
+            --shared-cares \
+            --shared-openssl \
+            --openssl-use-def-ca-store \
+            --no-create-symlinks \
+            CC=clang CXX=clang++
+
+      - name: Build Node20
+        working-directory: node20
+        run: |
+          make -j$(nproc)
+          make install DESTDIR=/tmp/nodeandroid
+
+      - name: Prepare MINIMAL build (node only, no npm)
+        run: |
+          mkdir -p final-minimal/usr/bin
+          mkdir -p final-minimal/usr/lib
+
+          cp /tmp/nodeandroid/output/bin/node final-minimal/usr/bin/
+          cp /tmp/nodeandroid/output/lib/*.so final-minimal/usr/lib/
+
+          cd final-minimal
+          zip -r node20-android-arm64-minimal.zip usr
+
+      - name: Add NPM for FULL build
+        run: |
+          cd node20
+          make install-npm DESTDIR=/tmp/nodeandroid
+
+      - name: Prepare FULL build (node + npm)
+        run: |
+          mkdir -p final-full/usr/bin
+          mkdir -p final-full/usr/lib
+          mkdir -p final-full/usr/lib/node_modules
+
+          cp /tmp/nodeandroid/output/bin/node final-full/usr/bin/
+          cp /tmp/nodeandroid/output/bin/npm final-full/usr/bin/
+          cp /tmp/nodeandroid/output/bin/npx final-full/usr/bin/
+
+          cp -r /tmp/nodeandroid/output/lib/node_modules final-full/usr/lib/
+          cp /tmp/nodeandroid/output/lib/*.so final-full/usr/lib/
+
+          cd final-full
+          zip -r node20-android-arm64-full.zip usr
+
+      - name: Upload Minimal Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: node20-android-arm64-minimal
+          path: final-minimal/node20-android-arm64-minimal.zip
+
+      - name: Upload Full Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: node20-android-arm64-full
+          path: final-full/node20-android-arm64-full.zip
