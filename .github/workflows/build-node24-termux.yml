@@ -1,4 +1,4 @@
-name: Build Node 24 for Android ARM64 (Termux-patched, fixed apply)
+name: Build Node 24 for Android ARM64 (Termux Patched)
 
 on:
   workflow_dispatch:
@@ -18,7 +18,8 @@ jobs:
           sudo apt install -y \
             python3 g++ make git curl zip \
             pkg-config libssl-dev zlib1g-dev \
-            brotli libbrotli-dev libc-ares-dev autoconf automake libtool
+            brotli libbrotli-dev libc-ares-dev \
+            autoconf automake libtool
 
       - name: Download Android NDK (API 28)
         run: |
@@ -31,18 +32,16 @@ jobs:
           git clone https://github.com/nodejs/node --branch v24.x --depth 1 node24
 
       ##################################################################
-      # Get Termux patches (only the exact 7 patches we will apply)
+      # ✔ Download only required Termux patches
       ##################################################################
-      - name: Download Termux Node patches (subset for Node24)
+      - name: Download Termux patches
         run: |
           git clone --depth 1 --filter=blob:none --sparse \
             https://github.com/termux/termux-packages termux-src
 
           cd termux-src
-          # check path exists and set the sparse path to the nodejs package
           git sparse-checkout set packages/nodejs
 
-          # create patches folder and copy only the needed patches (7)
           mkdir -p ../termux_patches
 
           cp packages/nodejs/avoid-ficlone-ioctl.patch ../termux_patches/ || true
@@ -53,20 +52,16 @@ jobs:
           cp packages/nodejs/tools-v8_gypfiles-toolchain.gypi.patch ../termux_patches/ || true
           cp packages/nodejs/tools-v8_gypfiles-v8.gyp.patch ../termux_patches/ || true
 
-          echo "Copied patches:"
-          ls -l ../termux_patches || true
-      ##################################################################
+          echo "Final patch list:"
+          ls -l ../termux_patches
 
-      - name: Apply Termux patches (only the 7 validated ones)
+      ##################################################################
+      # ✔ Apply the 7 safe patches
+      ##################################################################
+      - name: Apply Termux patches
         working-directory: node24
         run: |
           set -euo pipefail
-          if [ ! -d ../termux_patches ]; then
-            echo "termux_patches missing!" >&2
-            exit 1
-          fi
-
-          # apply patches in a deterministic order
           for p in \
             ../termux_patches/avoid-ficlone-ioctl.patch \
             ../termux_patches/common.gypi.patch \
@@ -76,15 +71,14 @@ jobs:
             ../termux_patches/tools-v8_gypfiles-toolchain.gypi.patch \
             ../termux_patches/tools-v8_gypfiles-v8.gyp.patch
           do
-            if [ -f "$p" ]; then
-              echo "Applying: $p"
-              patch -p1 < "$p" || ( echo "Patch failed: $p" >&2 ; exit 1 )
-            else
-              echo "Warning: expected patch not found: $p"
-            fi
+            echo "Applying: $p"
+            patch -p1 < "$p" || (echo "Patch failed: $p" && exit 1)
           done
 
-      - name: Configure Node.js for Android ARM64 (API 28)
+      ##################################################################
+      # ✔ Correct Android cross-compile configuration (Termux style)
+      ##################################################################
+      - name: Configure Node.js for Android ARM64
         working-directory: node24
         env:
           NDK: ${{ runner.home }}/ndk
@@ -93,17 +87,25 @@ jobs:
 
           export NDK="$HOME/ndk"
           export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-          export AR="$TOOLCHAIN/bin/llvm-ar"
-          export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
-          export CC="$TOOLCHAIN/bin/aarch64-linux-android28-clang"
-          export CXX="$TOOLCHAIN/bin/aarch64-linux-android28-clang++"
+          export SYSROOT="$TOOLCHAIN/sysroot"
 
-          echo "Using CC=$CC"
-          echo "Using CXX=$CXX"
-          echo "Toolchain dir: $TOOLCHAIN"
+          # Required so clang resolves to Android cross-compiler target
+          export PATH="$TOOLCHAIN/bin:$PATH"
 
-          # IMPORTANT: do NOT pass --no-create-symlinks to configure (it breaks upstream GYP).
-          # The Termux patches we applied ensure symlink behavior is handled in the build system.
+          # GYP-compatible compiler names
+          export CC=clang
+          export CXX=clang++
+          export CC_host=clang
+          export CXX_host=clang++
+
+          export AR=llvm-ar
+          export RANLIB=llvm-ranlib
+
+          # Required for Android
+          export CFLAGS="--sysroot=$SYSROOT"
+          export CXXFLAGS="--sysroot=$SYSROOT"
+          export LDFLAGS="--sysroot=$SYSROOT"
+
           ./configure \
             --prefix=/output \
             --dest-os=android \
@@ -113,9 +115,11 @@ jobs:
             --shared-cares \
             --shared-openssl \
             --openssl-use-def-ca-store \
-            --without-snapshot \
-            CC="$CC" CXX="$CXX"
+            --without-snapshot
 
+      ##################################################################
+      # ✔ Build and install
+      ##################################################################
       - name: Build Node 24
         working-directory: node24
         run: |
@@ -123,34 +127,31 @@ jobs:
           make -j$(nproc)
           make install DESTDIR=/tmp/nodeandroid
 
-      - name: Quick runtime check (node -v from built bundle)
+      ##################################################################
+      # ✔ Runtime sanity check
+      ##################################################################
+      - name: Verify node -v
         run: |
           set -euo pipefail
-          echo "List built output:"
-          ls -la /tmp/nodeandroid/output/bin || true
-          ls -la /tmp/nodeandroid/output/lib || true
-
-          # If node binary exists, try running it using the same layout (LD_LIBRARY_PATH)
           if [ -x /tmp/nodeandroid/output/bin/node ]; then
-            echo "Running built node -v with LD_LIBRARY_PATH set"
+            echo "Running built node:"
             LD_LIBRARY_PATH="/tmp/nodeandroid/output/lib" /tmp/nodeandroid/output/bin/node -v || true
           else
-            echo "Node binary not found — build likely failed" >&2
+            echo "ERROR: Node binary missing!" >&2
             exit 1
           fi
 
+      ##################################################################
+      # ✔ Package artifact
+      ##################################################################
       - name: Prepare Android bundle
         run: |
-          set -euo pipefail
           mkdir -p final/usr/bin
           mkdir -p final/usr/lib
 
           cp /tmp/nodeandroid/output/bin/node final/usr/bin/ || true
           cp /tmp/nodeandroid/output/bin/npm final/usr/bin/ || true
           cp /tmp/nodeandroid/output/lib/*.so final/usr/lib/ || true
-
-          echo "Final usr contents:"
-          ls -la final/usr || true
 
           cd final
           zip -r ../node24-full-android-arm64.zip usr
