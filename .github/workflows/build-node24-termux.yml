@@ -30,18 +30,18 @@ jobs:
           git clone https://github.com/nodejs/node --branch v24.x --depth 1 node24
 
       #######################################################################
-      # FIXED PART — Correct Termux patch download using sparse checkout
+      # ✔ FIXED — Correct Termux patch download (NO patches/ subfolder)
       #######################################################################
-      - name: Download Termux patches (Node 24)
+      - name: Download Termux Node patches (Node 24.x)
         run: |
           git clone --depth 1 --filter=blob:none --sparse \
             https://github.com/termux/termux-packages termux-src
 
           cd termux-src
-          git sparse-checkout set packages/nodejs/patches
+          git sparse-checkout set packages/nodejs
 
           mkdir ../termux_patches
-          cp packages/nodejs/patches/*.patch ../termux_patches/
+          cp packages/nodejs/*.patch ../termux_patches/
       #######################################################################
 
       - name: Apply Termux patches
@@ -49,7 +49,7 @@ jobs:
         run: |
           for patch in ../termux_patches/*.patch; do
             echo "Applying patch: $patch"
-            patch -p1 < "$patch"
+            patch -p1 < "$patch" || exit 1
           done
 
       - name: Configure Node.js for Android ARM64 (API 28)
@@ -81,7 +81,7 @@ jobs:
           make -j$(nproc)
           make install DESTDIR=/tmp/nodeandroid
 
-      - name: Package Android-ready Node bundle
+      - name: Prepare Android bundle
         run: |
           mkdir -p final/usr/bin
           mkdir -p final/usr/lib
