@@ -1,0 +1,70 @@
+name: Build Node24 for Android (Termux Patches)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-node:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install base dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git wget unzip proot qemu-user-static
+
+      - name: Clone Termux-packages
+        run: |
+          git clone https://github.com/termux/termux-packages.git --depth=1
+          cd termux-packages
+          git pull
+
+      - name: Install Termux build dependencies
+        working-directory: termux-packages
+        run: |
+          ./scripts/setup-termux.sh
+
+      - name: Build FULL Node.js 24 (with npm)
+        working-directory: termux-packages
+        run: |
+          ./build-package.sh -a aarch64 nodejs
+
+      - name: Build MINIMAL Node.js 24 (without npm)
+        working-directory: termux-packages
+        run: |
+          ./build-package.sh -a aarch64 nodejs-lts
+
+      - name: Locate built packages
+        run: |
+          mkdir output
+          cp termux-packages/output/nodejs_*_aarch64.deb output/full.deb
+          cp termux-packages/output/nodejs-lts_*_aarch64.deb output/minimal.deb
+
+      - name: Extract FULL Node package
+        run: |
+          mkdir full && cd full
+          dpkg-deb -x ../output/full.deb .
+          cd ..
+
+      - name: Extract MINIMAL Node package
+        run: |
+          mkdir minimal && cd minimal
+          dpkg-deb -x ../output/minimal.deb .
+          cd ..
+
+      - name: Prepare final ZIP bundles
+        run: |
+          mkdir final
+          cd full
+          zip -r ../final/node24-full-android-arm64.zip usr
+          cd ../minimal
+          zip -r ../final/node24-minimal-android-arm64.zip usr
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: node24-android-arm64
+          path: final/
