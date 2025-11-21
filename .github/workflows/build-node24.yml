@@ -15,9 +15,15 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y \
-            python3 g++ make git curl build-essential \
+            python3 git curl unzip build-essential \
             clang llvm pkg-config \
             zlib1g-dev libssl-dev libbrotli-dev libc-ares-dev
+
+      - name: Install Android NDK
+        run: |
+          wget https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+          unzip android-ndk-r26d-linux.zip
+          mv android-ndk-r26d $HOME/android-ndk
 
       - name: Clone Node 24
         run: |
@@ -25,12 +31,16 @@ jobs:
 
       - name: Configure Node for Android ARM64
         working-directory: node24
+        env:
+          CC: $HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
+          CXX: $HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++
+          AR: $HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          RANLIB: $HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
         run: |
           ./configure \
             --prefix=/output \
             --dest-os=android \
             --dest-cpu=arm64 \
-            --without-snapshot \
             --with-intl=none \
             --shared-cares \
             --shared-zlib \
@@ -38,7 +48,7 @@ jobs:
             --shared-openssl \
             --openssl-use-def-ca-store \
             --no-create-symlinks \
-            CC=clang CXX=clang++
+            --without-node-options
 
       - name: Build Node
         working-directory: node24
@@ -46,30 +56,17 @@ jobs:
           make -j$(nproc)
           make install DESTDIR=/tmp/nodeandroid
 
-      - name: Prepare final Android bundle
+      - name: Prepare final bundle
         run: |
           mkdir -p final/usr/bin
           mkdir -p final/usr/lib
-
           cp /tmp/nodeandroid/output/bin/node final/usr/bin/
           cp /tmp/nodeandroid/output/lib/*.so final/usr/lib/
-
           cd final
           zip -r node24-android-arm64.zip usr
 
-      - name: Upload Artifact (for Actions)
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: node24-android-arm64
           path: final/node24-android-arm64.zip
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: node24-arm64
-          name: Node 24 Android ARM64 Build
-          draft: false
-          prerelease: false
-          files: final/node24-android-arm64.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
