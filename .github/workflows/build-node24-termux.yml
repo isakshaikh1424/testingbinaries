@@ -29,12 +29,20 @@ jobs:
         run: |
           git clone https://github.com/nodejs/node --branch v24.x --depth 1 node24
 
+      #######################################################################
+      # FIXED PART — Correct Termux patch download using sparse checkout
+      #######################################################################
       - name: Download Termux patches (Node 24)
         run: |
-          mkdir termux_patches
-          wget -r -np -nd -A '*.patch' \
-            https://raw.githubusercontent.com/termux/termux-packages/master/packages/nodejs/patches/ \
-            -P termux_patches
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/termux/termux-packages termux-src
+
+          cd termux-src
+          git sparse-checkout set packages/nodejs/patches
+
+          mkdir ../termux_patches
+          cp packages/nodejs/patches/*.patch ../termux_patches/
+      #######################################################################
 
       - name: Apply Termux patches
         working-directory: node24
@@ -44,7 +52,7 @@ jobs:
             patch -p1 < "$patch"
           done
 
-      - name: Configure Node.js for Android ARM64
+      - name: Configure Node.js for Android ARM64 (API 28)
         working-directory: node24
         run: |
           export NDK=$HOME/ndk
