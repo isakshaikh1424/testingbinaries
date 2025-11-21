@@ -1,4 +1,4 @@
-name: Build Node 24 for Android ARM64 (Termux Patched)
+name: Build Node 24 for Android ARM64 (Final Stable 5-patch)
 
 on:
   workflow_dispatch:
@@ -16,9 +16,8 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y \
-            python3 g++ make git curl zip \
-            pkg-config libssl-dev zlib1g-dev \
-            brotli libbrotli-dev libc-ares-dev \
+            python3 g++ make git curl zip pkg-config \
+            libssl-dev zlib1g-dev brotli libbrotli-dev libc-ares-dev \
             autoconf automake libtool
 
       - name: Download Android NDK (API 28)
@@ -32,7 +31,7 @@ jobs:
           git clone https://github.com/nodejs/node --branch v24.x --depth 1 node24
 
       ##################################################################
-      # ✔ Download only required Termux patches
+      # Download ONLY the 5 safe Termux patches (no V8 toolchain patches)
       ##################################################################
       - name: Download Termux patches
         run: |
@@ -49,34 +48,31 @@ jobs:
           cp packages/nodejs/node.gyp.patch ../termux_patches/ || true
           cp packages/nodejs/src-getaddrinfo.patch ../termux_patches/ || true
           cp packages/nodejs/deps-v8-src-trap-handler-trap-handler.h.patch ../termux_patches/ || true
-          cp packages/nodejs/tools-v8_gypfiles-toolchain.gypi.patch ../termux_patches/ || true
-          cp packages/nodejs/tools-v8_gypfiles-v8.gyp.patch ../termux_patches/ || true
 
-          echo "Final patch list:"
+          echo "Using patches:"
           ls -l ../termux_patches
 
       ##################################################################
-      # ✔ Apply the 7 safe patches
+      # Apply ONLY the safe 5 patches
       ##################################################################
       - name: Apply Termux patches
         working-directory: node24
         run: |
           set -euo pipefail
+
           for p in \
             ../termux_patches/avoid-ficlone-ioctl.patch \
             ../termux_patches/common.gypi.patch \
             ../termux_patches/node.gyp.patch \
             ../termux_patches/src-getaddrinfo.patch \
-            ../termux_patches/deps-v8-src-trap-handler-trap-handler.h.patch \
-            ../termux_patches/tools-v8_gypfiles-toolchain.gypi.patch \
-            ../termux_patches/tools-v8_gypfiles-v8.gyp.patch
+            ../termux_patches/deps-v8-src-trap-handler-trap-handler.h.patch
           do
             echo "Applying: $p"
             patch -p1 < "$p" || (echo "Patch failed: $p" && exit 1)
           done
 
       ##################################################################
-      # ✔ Correct Android cross-compile configuration (Termux style)
+      # Proper Android cross-compiler configuration (Termux-style)
       ##################################################################
       - name: Configure Node.js for Android ARM64
         working-directory: node24
@@ -89,10 +85,10 @@ jobs:
           export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
           export SYSROOT="$TOOLCHAIN/sysroot"
 
-          # Required so clang resolves to Android cross-compiler target
+          # Ensure Android cross toolchain wraps clang
           export PATH="$TOOLCHAIN/bin:$PATH"
 
-          # GYP-compatible compiler names
+          # GYP requires generic names
           export CC=clang
           export CXX=clang++
           export CC_host=clang
@@ -100,8 +96,6 @@ jobs:
 
           export AR=llvm-ar
           export RANLIB=llvm-ranlib
-
-          # Required for Android
           export CFLAGS="--sysroot=$SYSROOT"
           export CXXFLAGS="--sysroot=$SYSROOT"
           export LDFLAGS="--sysroot=$SYSROOT"
@@ -118,46 +112,40 @@ jobs:
             --without-snapshot
 
       ##################################################################
-      # ✔ Build and install
+      # Build
       ##################################################################
       - name: Build Node 24
         working-directory: node24
         run: |
-          set -euo pipefail
           make -j$(nproc)
           make install DESTDIR=/tmp/nodeandroid
 
       ##################################################################
-      # ✔ Runtime sanity check
+      # Quick runtime check
       ##################################################################
-      - name: Verify node -v
+      - name: Verify runtime
         run: |
-          set -euo pipefail
-          if [ -x /tmp/nodeandroid/output/bin/node ]; then
-            echo "Running built node:"
-            LD_LIBRARY_PATH="/tmp/nodeandroid/output/lib" /tmp/nodeandroid/output/bin/node -v || true
-          else
-            echo "ERROR: Node binary missing!" >&2
-            exit 1
-          fi
+          echo "Checking node version:"
+          LD_LIBRARY_PATH="/tmp/nodeandroid/output/lib" \
+            /tmp/nodeandroid/output/bin/node -v || true
 
       ##################################################################
-      # ✔ Package artifact
+      # Package final output
       ##################################################################
       - name: Prepare Android bundle
         run: |
           mkdir -p final/usr/bin
           mkdir -p final/usr/lib
 
-          cp /tmp/nodeandroid/output/bin/node final/usr/bin/ || true
+          cp /tmp/nodeandroid/output/bin/node final/usr/bin/
           cp /tmp/nodeandroid/output/bin/npm final/usr/bin/ || true
           cp /tmp/nodeandroid/output/lib/*.so final/usr/lib/ || true
 
           cd final
-          zip -r ../node24-full-android-arm64.zip usr
+          zip -r ../node24-android-arm64.zip usr
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: node24-full-android-arm64
-          path: node24-full-android-arm64.zip
+          name: node24-android-arm64
+          path: node24-android-arm64.zip
