@@ -15,25 +15,62 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt update
-          sudo apt install -y python3 make git curl build-essential pkg-config zip
+          sudo apt install -y python3 make git curl build-essential \
+            pkg-config zip autoconf automake libtool cmake
 
+      # ---------------------------------------------------------------
+      # 1. Build c-ares (missing on runner)
+      # ---------------------------------------------------------------
+      - name: Build c-ares (for pkg-config)
+        run: |
+          git clone https://github.com/c-ares/c-ares.git --depth 1
+          cd c-ares
+          ./buildconf
+          ./configure --prefix=/usr
+          make -j$(nproc)
+          sudo make install
+
+      # ---------------------------------------------------------------
+      # 2. Build nghttp2 (needed for Node http2 support)
+      # ---------------------------------------------------------------
+      - name: Build nghttp2 (for pkg-config)
+        run: |
+          git clone https://github.com/nghttp2/nghttp2 --depth 1
+          cd nghttp2
+          autoreconf -i
+          ./configure --prefix=/usr --disable-app --disable-hpack-tools
+          make -j$(nproc)
+          sudo make install
+
+      # ---------------------------------------------------------------
+      # 3. Download Android NDK
+      # ---------------------------------------------------------------
       - name: Download Android NDK r26d
         run: |
           wget https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
           unzip android-ndk-r26d-linux.zip
           mv android-ndk-r26d $HOME/android-ndk
 
-      - name: Set Android Toolchain
+      # ---------------------------------------------------------------
+      # 4. Export Toolchain Paths
+      # ---------------------------------------------------------------
+      - name: Export Android Toolchain
         run: |
           echo "NDK=$HOME/android-ndk" >> $GITHUB_ENV
           echo "TOOLCHAIN=$HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
           echo "$HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
+      # ---------------------------------------------------------------
+      # 5. Clone Node 20
+      # ---------------------------------------------------------------
       - name: Clone Node 20
         run: |
           git clone https://github.com/nodejs/node --branch v20.x --depth 1 node20
 
-      - name: Configure Node20 for Android ARM64
+      # ---------------------------------------------------------------
+      # 6. Configure Node 20 for Android ARM64
+      # ---------------------------------------------------------------
+      - name: Configure Node for Android ARM64
         working-directory: node20
         env:
           CC: aarch64-linux-android21-clang
@@ -42,6 +79,7 @@ jobs:
           LD: ld.lld
           CC_host: clang
           CXX_host: clang++
+          PKG_CONFIG_PATH: "/usr/lib/pkgconfig"
         run: |
           ./configure \
             --prefix=/output \
@@ -54,15 +92,21 @@ jobs:
             --shared-brotli \
             --shared-cares \
             --shared-openssl \
-            --openssl-use-def-ca-store \
-            --no-create-symlinks
+            --shared-nghttp2 \
+            --openssl-use-def-ca-store
 
+      # ---------------------------------------------------------------
+      # 7. Build Node 20
+      # ---------------------------------------------------------------
       - name: Build Node20
         working-directory: node20
         run: |
           make -j$(nproc)
           make install DESTDIR=/tmp/nodeandroid
 
+      # ---------------------------------------------------------------
+      # 8. Prepare minimal build
+      # ---------------------------------------------------------------
       - name: Prepare Minimal Build
         run: |
           mkdir -p final-minimal/usr/bin
@@ -72,24 +116,35 @@ jobs:
           cd final-minimal
           zip -r node20-android-arm64-minimal.zip usr
 
-      - name: Install NPM for Full Build
+      # ---------------------------------------------------------------
+      # 9. Add npm for full build
+      # ---------------------------------------------------------------
+      - name: Install NPM
         working-directory: node20
         run: |
           make install-npm DESTDIR=/tmp/nodeandroid
 
+      # ---------------------------------------------------------------
+      # 10. Prepare Full Build
+      # ---------------------------------------------------------------
       - name: Prepare Full Build
         run: |
           mkdir -p final-full/usr/bin
           mkdir -p final-full/usr/lib
           mkdir -p final-full/usr/lib/node_modules
+
           cp /tmp/nodeandroid/output/bin/node final-full/usr/bin/
           cp /tmp/nodeandroid/output/bin/npm final-full/usr/bin/
           cp /tmp/nodeandroid/output/bin/npx final-full/usr/bin/
           cp -r /tmp/nodeandroid/output/lib/node_modules final-full/usr/lib/
           cp /tmp/nodeandroid/output/lib/*.so final-full/usr/lib/
+
           cd final-full
           zip -r node20-android-arm64-full.zip usr
 
+      # ---------------------------------------------------------------
+      # 11. Upload artifacts
+      # ---------------------------------------------------------------
       - name: Upload Minimal
         uses: actions/upload-artifact@v4
         with:
