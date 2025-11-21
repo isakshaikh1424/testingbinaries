@@ -1,70 +1,92 @@
-name: Build Node24 for Android (Termux Patches)
+name: Build Node 24 for Android ARM64
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-node:
+  build-node24:
     runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install base dependencies
+      - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y git wget unzip proot qemu-user-static
+          sudo apt install -y \
+            python3 g++ make git curl zip \
+            pkg-config libssl-dev zlib1g-dev \
+            brotli libbrotli-dev libc-ares-dev
 
-      - name: Clone Termux-packages
+      - name: Download Android NDK (API 28)
         run: |
-          git clone https://github.com/termux/termux-packages.git --depth=1
-          cd termux-packages
-          git pull
+          wget https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+          unzip android-ndk-r26d-linux.zip
+          mv android-ndk-r26d $HOME/ndk
 
-      - name: Install Termux build dependencies
-        working-directory: termux-packages
+      - name: Clone Node 24 source
         run: |
-          ./scripts/setup-termux.sh
+          git clone https://github.com/nodejs/node --branch v24.x --depth 1 node24
 
-      - name: Build FULL Node.js 24 (with npm)
-        working-directory: termux-packages
+      - name: Download Termux patches (Node 24)
         run: |
-          ./build-package.sh -a aarch64 nodejs
+          mkdir termux_patches
+          wget -r -np -nd -A '*.patch' \
+            https://raw.githubusercontent.com/termux/termux-packages/master/packages/nodejs/patches/ \
+            -P termux_patches
 
-      - name: Build MINIMAL Node.js 24 (without npm)
-        working-directory: termux-packages
+      - name: Apply Termux patches
+        working-directory: node24
         run: |
-          ./build-package.sh -a aarch64 nodejs-lts
+          for patch in ../termux_patches/*.patch; do
+            echo "Applying patch: $patch"
+            patch -p1 < "$patch"
+          done
 
-      - name: Locate built packages
+      - name: Configure Node.js for Android ARM64
+        working-directory: node24
         run: |
-          mkdir output
-          cp termux-packages/output/nodejs_*_aarch64.deb output/full.deb
-          cp termux-packages/output/nodejs-lts_*_aarch64.deb output/minimal.deb
+          export NDK=$HOME/ndk
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export CC="$TOOLCHAIN/bin/aarch64-linux-android28-clang"
+          export CXX="$TOOLCHAIN/bin/aarch64-linux-android28-clang++"
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
 
-      - name: Extract FULL Node package
+          ./configure \
+            --prefix=/output \
+            --dest-os=android \
+            --dest-cpu=arm64 \
+            --shared-zlib \
+            --shared-brotli \
+            --shared-cares \
+            --shared-openssl \
+            --openssl-use-def-ca-store \
+            --without-snapshot \
+            --no-create-symlinks \
+            CC="$CC" CXX="$CXX"
+
+      - name: Build Node 24
+        working-directory: node24
         run: |
-          mkdir full && cd full
-          dpkg-deb -x ../output/full.deb .
-          cd ..
+          make -j$(nproc)
+          make install DESTDIR=/tmp/nodeandroid
 
-      - name: Extract MINIMAL Node package
+      - name: Package Android-ready Node bundle
         run: |
-          mkdir minimal && cd minimal
-          dpkg-deb -x ../output/minimal.deb .
-          cd ..
+          mkdir -p final/usr/bin
+          mkdir -p final/usr/lib
 
-      - name: Prepare final ZIP bundles
-        run: |
-          mkdir final
-          cd full
-          zip -r ../final/node24-full-android-arm64.zip usr
-          cd ../minimal
-          zip -r ../final/node24-minimal-android-arm64.zip usr
+          cp /tmp/nodeandroid/output/bin/node final/usr/bin/
+          cp /tmp/nodeandroid/output/bin/npm final/usr/bin/ || true
+          cp /tmp/nodeandroid/output/lib/*.so final/usr/lib/
 
-      - name: Upload artifacts
+          cd final
+          zip -r node24-full-android-arm64.zip usr
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: node24-android-arm64
-          path: final/
+          name: node24-full-android-arm64
+          path: final/node24-full-android-arm64.zip
